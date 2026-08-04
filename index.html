@@ -2,6 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<script>
+  // Force the canonical host: https://diladeghar.com (no www, https only).
+  // Runs first, before render, to consolidate http/www/https variants that
+  // Search Console flagged as duplicate/redirect issues. If a server-level
+  // (Cloudflare) redirect is later added, this becomes a harmless backup.
+  (function () {
+    var host = window.location.hostname;
+    var protocol = window.location.protocol;
+    if (host !== 'diladeghar.com' || protocol !== 'https:') {
+      window.location.replace('https://diladeghar.com' + window.location.pathname + window.location.search + window.location.hash);
+    }
+  })();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DilaDeGhar.com | Independent Real Estate Advisory — Zirakpur, Mohali, Chandigarh</title>
 <meta name="description" content="DilaDeGhar.com is an independent real estate advisory helping you compare verified residential projects, schedule site visits and buy the right home across Zirakpur, Mohali, Chandigarh, New Chandigarh and Panchkula.">
