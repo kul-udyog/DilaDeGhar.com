@@ -91,6 +91,11 @@
 
   /* Heart-pin blob, traced loosely from the DilaDeGhar mark, used as a signature background shape */
   .pin-blob { clip-path: path('M150 0C67 0 0 64 0 143c0 96 120 190 138 250 4 13 20 13 24 0 18-60 138-154 138-250C300 64 233 0 150 0Z'); }
+
+  /* Truecaller one-tap verification: waiting spinner shown while polling for the result */
+  .tc-spinner { width: 44px; height: 44px; border-radius: 9999px; border: 3px solid rgba(15,62,67,0.12); border-top-color: #1B676E; animation: tc-spin 0.8s linear infinite; }
+  @keyframes tc-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .tc-spinner { animation: none; } }
 </style>
 </head>
 
@@ -858,12 +863,19 @@
       </form>
     </div>
 
+    <div id="leadModalTruecallerView" class="hidden py-8 text-center">
+      <div class="tc-spinner mx-auto mb-5"></div>
+      <h3 class="font-display font-bold text-xl text-teal-900">Verifying with Truecaller…</h3>
+      <p id="leadModalTruecallerNote" class="text-ink-600 text-sm mt-2">Check your screen and tap Continue in the Truecaller prompt.</p>
+      <button type="button" onclick="skipTruecallerVerification()" class="mt-6 text-teal-700 font-semibold text-sm hover:text-orange-500 transition-colors">Enter details manually instead</button>
+    </div>
+
     <div id="leadModalSuccessView" class="hidden py-6 text-center">
       <div class="w-14 h-14 rounded-full bg-teal-700 flex items-center justify-center mx-auto mb-4">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/></svg>
       </div>
       <h3 class="font-display font-bold text-xl text-teal-900">Thank you!</h3>
-      <p class="text-ink-600 text-sm mt-2">We've received your enquiry — our team will call you within 24 hours.</p>
+      <p id="leadModalSuccessNote" class="text-ink-600 text-sm mt-2">We've received your enquiry — our team will call you within 24 hours.</p>
       <button type="button" onclick="closeLeadModal()" class="mt-6 text-teal-700 font-semibold text-sm hover:text-orange-500 transition-colors">Close</button>
     </div>
   </div>
@@ -1015,12 +1027,187 @@
 
   const leadOverlay = document.getElementById('leadModalOverlay');
   const leadFormView = document.getElementById('leadModalFormView');
+  const leadTruecallerView = document.getElementById('leadModalTruecallerView');
+  const leadTruecallerNote = document.getElementById('leadModalTruecallerNote');
   const leadSuccessView = document.getElementById('leadModalSuccessView');
+  const leadSuccessNote = document.getElementById('leadModalSuccessNote');
   const leadModalForm = document.getElementById('leadModalForm');
   const leadModalInterest = document.getElementById('leadModalInterest');
   const leadModalSubtitle = document.getElementById('leadModalSubtitle');
   let leadModalOpenedHistory = false;
   let leadModalAction = null; // null | 'call' | 'whatsapp'
+
+  // ---- Truecaller one-tap verification (Android only) ----
+  // Used for every CTA EXCEPT Call Now / WhatsApp (those stay exactly as
+  // they were: straight to the manual name+phone form). For every other
+  // button (Enquire Now, Know More, category cards, EMI calculator CTA),
+  // we first try to auto-verify the visitor's number via the Truecaller
+  // app on Android; anywhere that isn't possible (iOS, desktop, Truecaller
+  // not installed, or verification not completed within the wait window)
+  // falls straight back to the normal manual form — no dead ends.
+  //
+  // App Key below is from the "DilaDeGhar" Web app registered at
+  // https://verification-sdk-console.truecaller.com (domain diladeghar.com,
+  // callback URL = LEADS_ENDPOINT below, same as the Escon Primera app
+  // already on this account). If this key ever needs to change, this
+  // constant is the only place to update it.
+  const TRUECALLER_APP_KEY = 'nYHp8044b29d83c6b4886b6cadf3dd3d8a157';
+  const TRUECALLER_APP_NAME = 'DilaDeGhar';
+  const TRUECALLER_POLL_INTERVAL_MS = 3000;
+  const TRUECALLER_POLL_CYCLES = 6; // ~18s total — Truecaller recommends 5 cycles @ 3s
+  const TRUECALLER_FOCUS_CHECK_MS = 600; // per Truecaller's own integration guide
+
+  let currentTruecallerRequestId = null;
+
+  function isTruecallerConfigured() {
+    return !!TRUECALLER_APP_KEY && TRUECALLER_APP_KEY.indexOf('PASTE_') !== 0;
+  }
+
+  function isAndroidBrowser() {
+    return /Android/i.test(navigator.userAgent || '');
+  }
+
+  function generateTruecallerRequestId() {
+    // 8–64 chars required; this yields a ~32-char alphanumeric id.
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+    return 'tc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  }
+
+  function buildTruecallerDeepLink(requestId) {
+    const params = {
+      type: 'btmsheet',
+      requestNonce: requestId,
+      partnerKey: TRUECALLER_APP_KEY,
+      partnerName: TRUECALLER_APP_NAME,
+      lang: 'en',
+      privacyUrl: 'https://diladeghar.com/privacy-policy.html',
+      termsUrl: 'https://diladeghar.com/terms.html',
+      loginPrefix: 'getdetails',
+      loginSuffix: 'verifymobile',
+      ctaPrefix: 'continuewith',
+      ctaColor: '#1B676E',
+      ctaTextColor: '#FFFFFF',
+      btnShape: 'round',
+      skipOption: 'manualdetails',
+      ttl: '20000'
+    };
+    const qs = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
+    return 'truecallersdk://truesdk/web_verify?' + qs;
+  }
+
+  // JSONP request — Google Apps Script Web Apps don't return usable CORS
+  // headers for a normal fetch() read (see submitLeadToSheet above), so
+  // polling for the Truecaller result uses a <script> tag callback instead.
+  function truecallerJsonp(params, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const cbName = 'tcCb_' + Math.random().toString(36).slice(2);
+      const script = document.createElement('script');
+      let settled = false;
+      const timer = setTimeout(() => finish(() => reject(new Error('timeout'))), timeoutMs || 5000);
+      function finish(action) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        delete window[cbName];
+        if (script.parentNode) script.parentNode.removeChild(script);
+        action();
+      }
+      window[cbName] = (data) => finish(() => resolve(data));
+      script.onerror = () => finish(() => reject(new Error('jsonp error')));
+      const qs = Object.assign({}, params, { callback: cbName });
+      script.src = LEADS_ENDPOINT + '?' + Object.keys(qs).map(k => k + '=' + encodeURIComponent(qs[k])).join('&');
+      document.head.appendChild(script);
+    });
+  }
+
+  function showLeadFormStep(interest) {
+    leadFormView.classList.remove('hidden');
+    leadTruecallerView.classList.add('hidden');
+    leadSuccessView.classList.add('hidden');
+    leadModalForm.reset();
+    leadModalInterest.value = interest;
+  }
+
+  function showTruecallerWaitingStep() {
+    leadTruecallerNote.textContent = "Check your screen and tap Continue in the Truecaller prompt.";
+    leadFormView.classList.add('hidden');
+    leadTruecallerView.classList.remove('hidden');
+    leadSuccessView.classList.add('hidden');
+  }
+
+  function showLeadSuccessStep(message) {
+    leadSuccessNote.textContent = message || "We've received your enquiry — our team will call you within 24 hours.";
+    leadFormView.classList.add('hidden');
+    leadTruecallerView.classList.add('hidden');
+    leadSuccessView.classList.remove('hidden');
+  }
+
+  window.skipTruecallerVerification = function () {
+    currentTruecallerRequestId = null;
+    showLeadFormStep(leadModalInterest.value);
+  };
+
+  async function pollTruecallerStatus(requestId, interest) {
+    for (let cycle = 0; cycle < TRUECALLER_POLL_CYCLES; cycle++) {
+      await new Promise(r => setTimeout(r, TRUECALLER_POLL_INTERVAL_MS));
+      if (currentTruecallerRequestId !== requestId) return; // cancelled / modal closed / user skipped
+
+      let data;
+      try {
+        data = await truecallerJsonp({ action: 'truecallerStatus', requestId: requestId });
+      } catch (err) {
+        continue; // transient network hiccup — keep polling
+      }
+      if (currentTruecallerRequestId !== requestId) return;
+
+      if (data && data.status === 'verified') {
+        currentTruecallerRequestId = null;
+        submitLeadToSheet({
+          name: data.name || '',
+          phone: data.phone || '',
+          email: '',
+          interest: interest + ' (Truecaller verified)'
+        });
+        const firstName = (data.name || '').split(' ')[0];
+        showLeadSuccessStep(firstName
+          ? `Thanks, ${firstName} — verified via Truecaller. Our team will call you within 24 hours.`
+          : "Verified via Truecaller — our team will call you within 24 hours.");
+        return;
+      }
+      if (data && (data.status === 'rejected' || data.status === 'error')) {
+        currentTruecallerRequestId = null;
+        showLeadFormStep(interest);
+        return;
+      }
+      // 'flow_invoked' / 'pending' / unknown — keep polling
+    }
+    // Ran out of cycles with no result — don't leave the visitor stuck.
+    if (currentTruecallerRequestId === requestId) {
+      currentTruecallerRequestId = null;
+      showLeadFormStep(interest);
+    }
+  }
+
+  function tryTruecallerVerification(interest) {
+    if (!isTruecallerConfigured() || !isAndroidBrowser()) {
+      showLeadFormStep(interest);
+      return;
+    }
+    const requestId = generateTruecallerRequestId();
+    currentTruecallerRequestId = requestId;
+    showTruecallerWaitingStep();
+    window.location = buildTruecallerDeepLink(requestId);
+    setTimeout(() => {
+      if (currentTruecallerRequestId !== requestId) return; // already skipped/cancelled
+      if (document.hasFocus()) {
+        // Page never lost focus — Truecaller app isn't present/didn't open.
+        currentTruecallerRequestId = null;
+        showLeadFormStep(interest);
+      } else {
+        pollTruecallerStatus(requestId, interest);
+      }
+    }, TRUECALLER_FOCUS_CHECK_MS);
+  }
 
   window.openLeadModal = function (interest, action) {
     interest = interest || 'Website Enquiry';
@@ -1035,10 +1222,6 @@
     } else {
       leadModalSubtitle.textContent = "Share your number — our team will call you within 24 hours.";
     }
-    leadFormView.classList.remove('hidden');
-    leadSuccessView.classList.add('hidden');
-    leadModalForm.reset();
-    leadModalInterest.value = interest;
     leadOverlay.classList.remove('hidden');
     leadOverlay.classList.add('flex');
     document.body.style.overflow = 'hidden';
@@ -1046,9 +1229,17 @@
       history.pushState({ leadModal: true }, '');
       leadModalOpenedHistory = true;
     }
+
+    if (leadModalAction === 'call' || leadModalAction === 'whatsapp') {
+      // Unchanged behaviour: straight to the manual form, no Truecaller step.
+      showLeadFormStep(interest);
+    } else {
+      tryTruecallerVerification(interest);
+    }
   };
 
   window.closeLeadModal = function (fromPopstate) {
+    currentTruecallerRequestId = null; // stop any in-flight polling
     leadOverlay.classList.add('hidden');
     leadOverlay.classList.remove('flex');
     document.body.style.overflow = '';
@@ -1194,8 +1385,7 @@
       email: leadModalForm.email.value,
       interest: leadModalInterest.value
     });
-    leadFormView.classList.add('hidden');
-    leadSuccessView.classList.remove('hidden');
+    showLeadSuccessStep();
 
     // Fire the actual call/WhatsApp action now that the lead is captured.
     if (leadModalAction === 'call') {
