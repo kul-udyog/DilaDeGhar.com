@@ -1054,8 +1054,9 @@
   const TRUECALLER_APP_KEY = 'nYHp8044b29d83c6b4886b6cadf3dd3d8a157';
   const TRUECALLER_APP_NAME = 'DilaDeGhar';
   const TRUECALLER_POLL_INTERVAL_MS = 3000;
-  const TRUECALLER_POLL_CYCLES = 6; // ~18s total — Truecaller recommends 5 cycles @ 3s
+  const TRUECALLER_POLL_CYCLES = 10; // ~30s total — Truecaller's own docs recommend a 30s client threshold before giving up
   const TRUECALLER_FOCUS_CHECK_MS = 600; // per Truecaller's own integration guide
+  const TRUECALLER_FOCUS_CHECK_MS_2 = 1500; // second-chance check for slower Android app-switches (fix, 28 Aug 2026)
 
   let currentTruecallerRequestId = null;
 
@@ -1197,16 +1198,7 @@
     currentTruecallerRequestId = requestId;
     showTruecallerWaitingStep();
     window.location = buildTruecallerDeepLink(requestId);
-    setTimeout(() => {
-      if (currentTruecallerRequestId !== requestId) return; // already skipped/cancelled
-      if (document.hasFocus()) {
-        // Page never lost focus — Truecaller app isn't present/didn't open.
-        currentTruecallerRequestId = null;
-        showLeadFormStep(interest);
-      } else {
-        pollTruecallerStatus(requestId, interest);
-      }
-    }, TRUECALLER_FOCUS_CHECK_MS);
+    (function(){ var checkFocus = function(isFinalCheck){ if (currentTruecallerRequestId !== requestId) return; if (document.hasFocus()) { if (!isFinalCheck) { setTimeout(function(){ checkFocus(true); }, TRUECALLER_FOCUS_CHECK_MS_2); return; } currentTruecallerRequestId = null; showLeadFormStep(interest); } else { pollTruecallerStatus(requestId, interest); } }; setTimeout(function(){ checkFocus(false); }, TRUECALLER_FOCUS_CHECK_MS); })();
   }
 
   window.openLeadModal = function (interest, action) {
