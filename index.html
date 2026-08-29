@@ -1226,7 +1226,7 @@
       // Unchanged behaviour: straight to the manual form, no Truecaller step.
       showLeadFormStep(interest);
     } else {
-      tryTruecallerVerification(interest);
+      showLeadFormStep(interest); // Truecaller disabled 29 Aug 2026 per owner request - always go straight to the manual form
     }
   };
 
